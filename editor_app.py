@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
+import re
 import anthropic
 
 st.set_page_config(page_title="Sala de Redacción", page_icon="📋", layout="wide")
@@ -15,10 +15,7 @@ html, body, [class*="css"] { font-family: 'Source Sans 3', sans-serif; }
     border-bottom: 4px solid #c8a84b;
     display: flex; align-items: baseline; gap: 18px;
 }
-.header-block h1 {
-    font-family: 'Playfair Display', serif; font-size: 2.2rem;
-    font-weight: 900; margin: 0; color: #f5f0e8;
-}
+.header-block h1 { font-family: 'Playfair Display', serif; font-size: 2.2rem; font-weight: 900; margin: 0; color: #f5f0e8; }
 .header-block .tagline { font-size: 0.85rem; color: #c8a84b; letter-spacing: 2px; text-transform: uppercase; font-weight: 600; }
 .section-label { font-size: 0.7rem; letter-spacing: 3px; text-transform: uppercase; color: #c8a84b; font-weight: 700; margin-bottom: 6px; }
 .source-card { background: #faf9f6; border: 1px solid #e0ddd5; border-left: 4px solid #0d0d0d; padding: 14px 18px; border-radius: 2px; margin-bottom: 16px; font-size: 0.9rem; color: #333; }
@@ -50,18 +47,43 @@ HEADERS = {
     "Accept-Language": "es-AR,es;q=0.9",
 }
 
+def limpiar_html(html):
+    """Elimina tags HTML y devuelve texto plano."""
+    # Eliminar scripts y styles completos
+    html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html, flags=re.DOTALL | re.IGNORECASE)
+    # Convertir algunos tags a saltos de línea
+    html = re.sub(r'<(br|p|div|h[1-6])[^>]*>', '\n', html, flags=re.IGNORECASE)
+    # Eliminar todos los demás tags
+    html = re.sub(r'<[^>]+>', '', html)
+    # Decodificar entidades HTML básicas
+    html = html.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
+    # Limpiar líneas
+    lineas = [l.strip() for l in html.splitlines() if len(l.strip()) > 40]
+    return '\n'.join(lineas)
+
 def extraer_texto(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = soup.find("h1").get_text(strip=True) if soup.find("h1") else (soup.title.string or "")
-        article = soup.find("article")
-        parrafos = article.find_all("p") if article else soup.find_all("p")
-        body = " ".join(p.get_text(strip=True) for p in parrafos if len(p.get_text(strip=True)) > 40)
-        if not body:
-            return title, "", "No se pudo extraer texto del artículo."
-        return title, body[:6000], None
+        html = r.text
+
+        # Intentar extraer solo el artículo principal
+        match = re.search(r'<article[^>]*>(.*?)</article>', html, re.DOTALL | re.IGNORECASE)
+        if match:
+            texto = limpiar_html(match.group(1))
+        else:
+            # Fallback: todo el body
+            body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+            texto = limpiar_html(body_match.group(1) if body_match else html)
+
+        # Título
+        title_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
+        titulo = re.sub(r'<[^>]+>', '', title_match.group(1)).strip() if title_match else ""
+
+        if not texto:
+            return titulo, "", "No se pudo extraer texto del artículo."
+        return titulo, texto[:6000], None
+
     except Exception as e:
         return "", "", str(e)[:120]
 
@@ -74,13 +96,12 @@ def llamar_claude(api_key, prompt):
     )
     return msg.content[0].text
 
-# Reglas estrictas anti-alucinación que se inyectan en todos los prompts
 REGLAS = """
 REGLAS ESTRICTAS (no las rompas bajo ninguna circunstancia):
 - Usá ÚNICAMENTE información que esté explícitamente en el texto fuente.
 - Si un dato, nombre, cifra o hecho no aparece en el texto, no lo incluyas.
-- No parafraseés: reescribí con tus propias palabras y estructura, pero sin cambiar el sentido ni agregar nada.
-- No completes con contexto general, conocimiento propio ni suposiciones, aunque parezcan obvias.
+- Reescribí con estructura y palabras propias, pero sin agregar nada que no esté en la fuente.
+- No completes con contexto general ni suposiciones, aunque parezcan obvias.
 - Si el texto no tiene suficiente información para cumplir la tarea, avisalo en vez de inventar.
 """
 
@@ -116,77 +137,50 @@ if analizar:
 
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # ── RESUMEN ──────────────────────────────────────────────────────────────
+    # RESUMEN
     st.markdown('<div class="section-label">Resumen ejecutivo</div>', unsafe_allow_html=True)
     with st.spinner("Generando resumen..."):
-        prompt = f"""Sos un editor periodístico de deportes argentino. Escribís en castellano rioplatense, directo y sin relleno.
+        resumen = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
 {REGLAS}
 Texto fuente:
-\"\"\"
-{cuerpo}
-\"\"\"
-Tarea: escribí un resumen de 3 a 5 oraciones con los hechos más importantes.
-Reescribí con estructura y palabras propias, pero sin agregar ningún dato que no esté en el texto. Sin introducción ni cierre."""
-        resumen = llamar_claude(api_key, prompt)
+\"\"\"{cuerpo}\"\"\"
+Escribí un resumen de 3 a 5 oraciones con los hechos más importantes. Sin introducción ni cierre.""")
     st.markdown(f'<div class="output-box">{resumen}</div>', unsafe_allow_html=True)
     st.code(resumen, language=None)
-
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # ── TITULARES ─────────────────────────────────────────────────────────────
+    # TITULARES
     st.markdown('<div class="section-label">Opciones de titular</div>', unsafe_allow_html=True)
     with st.spinner("Generando titulares..."):
-        prompt = f"""Sos un editor periodístico de deportes argentino. Escribís en castellano rioplatense, directo y sin relleno.
+        titulares = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
 {REGLAS}
 Texto fuente:
-\"\"\"
-{cuerpo}
-\"\"\"
-Tarea: generá 5 titulares alternativos.
-- Variá los enfoques: impactante, informativo, gancho emocional, dato concreto, pregunta.
-- Máximo 12 palabras por titular.
-- Cada titular debe poder respaldarse con algo que esté literalmente en el texto fuente.
-- Numeralos del 1 al 5, uno por línea, sin explicaciones adicionales."""
-        titulares = llamar_claude(api_key, prompt)
+\"\"\"{cuerpo}\"\"\"
+Generá 5 titulares alternativos. Enfoques: impactante, informativo, gancho emocional, dato concreto, pregunta. Máximo 12 palabras. Numeralos del 1 al 5, uno por línea, sin explicaciones.""")
     st.markdown(f'<div class="output-box">{titulares}</div>', unsafe_allow_html=True)
     st.code(titulares, language=None)
-
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # ── COPETE ────────────────────────────────────────────────────────────────
+    # COPETE
     st.markdown('<div class="section-label">Copete / bajada</div>', unsafe_allow_html=True)
     with st.spinner("Generando copete..."):
-        prompt = f"""Sos un editor periodístico de deportes argentino. Escribís en castellano rioplatense, directo y sin relleno.
+        copete = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
 {REGLAS}
 Texto fuente:
-\"\"\"
-{cuerpo}
-\"\"\"
-Tarea: escribí 2 versiones de copete/bajada.
-- Versión A: descriptiva (qué pasó, quiénes, dónde) — solo con datos del texto.
-- Versión B: con gancho (arranca con un dato llamativo o tensión) — el dato debe estar en el texto, no lo inventes.
-Cada copete: máximo 30 palabras. Si el texto no tiene suficiente info para la versión B, decilo en vez de completar con suposiciones."""
-        copete = llamar_claude(api_key, prompt)
+\"\"\"{cuerpo}\"\"\"
+Escribí 2 copetes: Versión A descriptiva (qué pasó, quiénes, dónde). Versión B con gancho (dato llamativo del texto, no inventado). Máximo 30 palabras cada uno.""")
     st.markdown(f'<div class="output-box">{copete}</div>', unsafe_allow_html=True)
     st.code(copete, language=None)
-
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # ── ÁNGULO PROPIO ─────────────────────────────────────────────────────────
+    # ÁNGULO
     st.markdown('<div class="section-label">Ángulo para nota propia</div>', unsafe_allow_html=True)
     with st.spinner("Buscando ángulos..."):
-        prompt = f"""Sos un editor periodístico de deportes argentino. Escribís en castellano rioplatense, directo y sin relleno.
+        angulo = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
 {REGLAS}
 Texto fuente:
-\"\"\"
-{cuerpo}
-\"\"\"
-Tarea: sugerí 3 ángulos para escribir una nota propia.
-- Cada ángulo debe partir de algo concreto que SÍ esté en el texto (una cita, un dato, un hecho).
-- Podés sugerir qué preguntas hacer o qué fuentes consultar para ampliar, pero dejá claro que son sugerencias de trabajo, no información ya existente.
-- No afirmes nada que no esté en el texto.
-Numeralos y describí cada uno en 2 oraciones máximo."""
-        angulo = llamar_claude(api_key, prompt)
+\"\"\"{cuerpo}\"\"\"
+Sugerí 3 ángulos para nota propia. Cada uno parte de algo concreto del texto. Podés sugerir preguntas o fuentes a consultar, aclarando que son sugerencias de trabajo. Numeralos, 2 oraciones máximo cada uno.""")
     st.markdown(f'<div class="output-box">{angulo}</div>', unsafe_allow_html=True)
     st.code(angulo, language=None)
 
