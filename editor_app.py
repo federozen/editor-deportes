@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 import re
-import anthropic
+import json
 
 st.set_page_config(page_title="Sala de Redacción", page_icon="📋", layout="wide")
 
@@ -42,67 +42,60 @@ with st.sidebar:
     st.markdown("3. Hacé clic en Analizar")
     st.markdown("4. Copiá lo que necesités")
 
-HEADERS = {
+FETCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119.0 Safari/537.36",
     "Accept-Language": "es-AR,es;q=0.9",
 }
 
 def limpiar_html(html):
-    """Elimina tags HTML y devuelve texto plano."""
-    # Eliminar scripts y styles completos
     html = re.sub(r'<(script|style)[^>]*>.*?</(script|style)>', '', html, flags=re.DOTALL | re.IGNORECASE)
-    # Convertir algunos tags a saltos de línea
     html = re.sub(r'<(br|p|div|h[1-6])[^>]*>', '\n', html, flags=re.IGNORECASE)
-    # Eliminar todos los demás tags
     html = re.sub(r'<[^>]+>', '', html)
-    # Decodificar entidades HTML básicas
     html = html.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"').replace('&#39;', "'")
-    # Limpiar líneas
     lineas = [l.strip() for l in html.splitlines() if len(l.strip()) > 40]
     return '\n'.join(lineas)
 
 def extraer_texto(url):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = requests.get(url, headers=FETCH_HEADERS, timeout=15)
         r.raise_for_status()
         html = r.text
-
-        # Intentar extraer solo el artículo principal
         match = re.search(r'<article[^>]*>(.*?)</article>', html, re.DOTALL | re.IGNORECASE)
-        if match:
-            texto = limpiar_html(match.group(1))
-        else:
-            # Fallback: todo el body
-            body_match = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
-            texto = limpiar_html(body_match.group(1) if body_match else html)
-
-        # Título
+        texto = limpiar_html(match.group(1) if match else html)
         title_match = re.search(r'<h1[^>]*>(.*?)</h1>', html, re.DOTALL | re.IGNORECASE)
         titulo = re.sub(r'<[^>]+>', '', title_match.group(1)).strip() if title_match else ""
-
         if not texto:
-            return titulo, "", "No se pudo extraer texto del artículo."
+            return titulo, "", "No se pudo extraer texto."
         return titulo, texto[:6000], None
-
     except Exception as e:
         return "", "", str(e)[:120]
 
 def llamar_claude(api_key, prompt):
-    client = anthropic.Anthropic(api_key=api_key)
-    msg = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{"role": "user", "content": prompt}]
+    response = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        json={
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1000,
+            "messages": [{"role": "user", "content": prompt}]
+        },
+        timeout=30
     )
-    return msg.content[0].text
+    data = response.json()
+    if "content" in data:
+        return data["content"][0]["text"]
+    return f"Error: {data.get('error', {}).get('message', 'Respuesta inesperada')}"
 
 REGLAS = """
-REGLAS ESTRICTAS (no las rompas bajo ninguna circunstancia):
-- Usá ÚNICAMENTE información que esté explícitamente en el texto fuente.
-- Si un dato, nombre, cifra o hecho no aparece en el texto, no lo incluyas.
-- Reescribí con estructura y palabras propias, pero sin agregar nada que no esté en la fuente.
-- No completes con contexto general ni suposiciones, aunque parezcan obvias.
-- Si el texto no tiene suficiente información para cumplir la tarea, avisalo en vez de inventar.
+REGLAS ESTRICTAS:
+- Usá ÚNICAMENTE información que esté en el texto fuente.
+- Si un dato no aparece en el texto, no lo incluyas.
+- Reescribí con palabras propias pero sin agregar nada que no esté en la fuente.
+- Si el texto no alcanza para la tarea, avisalo en vez de inventar.
 """
 
 st.markdown('<div class="section-label">Fuente</div>', unsafe_allow_html=True)
@@ -137,7 +130,6 @@ if analizar:
 
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # RESUMEN
     st.markdown('<div class="section-label">Resumen ejecutivo</div>', unsafe_allow_html=True)
     with st.spinner("Generando resumen..."):
         resumen = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
@@ -149,7 +141,6 @@ Escribí un resumen de 3 a 5 oraciones con los hechos más importantes. Sin intr
     st.code(resumen, language=None)
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # TITULARES
     st.markdown('<div class="section-label">Opciones de titular</div>', unsafe_allow_html=True)
     with st.spinner("Generando titulares..."):
         titulares = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
@@ -161,7 +152,6 @@ Generá 5 titulares alternativos. Enfoques: impactante, informativo, gancho emoc
     st.code(titulares, language=None)
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # COPETE
     st.markdown('<div class="section-label">Copete / bajada</div>', unsafe_allow_html=True)
     with st.spinner("Generando copete..."):
         copete = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
@@ -173,7 +163,6 @@ Escribí 2 copetes: Versión A descriptiva (qué pasó, quiénes, dónde). Versi
     st.code(copete, language=None)
     st.markdown('<hr class="ruled">', unsafe_allow_html=True)
 
-    # ÁNGULO
     st.markdown('<div class="section-label">Ángulo para nota propia</div>', unsafe_allow_html=True)
     with st.spinner("Buscando ángulos..."):
         angulo = llamar_claude(api_key, f"""Sos un editor periodístico de deportes argentino. Castellano rioplatense, directo, sin relleno.
